@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core-tests:
+    name: Core tests (Windows, user-mode)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The user-mode preset builds the portable core, the Windows service/tray
+      # and the test executable, but skips the WDK minifilter driver (which
+      # needs the Windows Driver Kit and a signed/loaded driver to exercise).
+      # That is exactly the surface the automated tests cover.
+      - name: Configure
+        run: cmake --preset windows-user-mode-debug
+
+      - name: Build
+        run: cmake --build --preset windows-user-mode-debug
+
+      - name: Test
+        run: ctest --preset windows-user-mode-debug

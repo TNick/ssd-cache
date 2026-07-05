@@ -28,3 +28,7 @@ docs                 Design and research notes.
 
 All developer-facing setup, build, local startup, driver test-mode, packaging,
 and configuration instructions live in [DEVELOPERS.md](DEVELOPERS.md).
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE) for details.
