@@ -1,0 +1,50 @@
+[Version]
+Signature="$WINDOWS NT$"
+Class=ActivityMonitor
+ClassGuid={b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider=%ManufacturerName%
+DriverVer=07/05/2026,0.1.0.0
+CatalogFile=cachemon.cat
+
+[DestinationDirs]
+DefaultDestDir=13
+CacheMon.DriverFiles=13
+
+[DefaultInstall.NTamd64]
+OptionDesc=%ServiceDescription%
+CopyFiles=CacheMon.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService=%ServiceName%,,CacheMon.Service
+
+[CacheMon.DriverFiles]
+cachemon.sys
+
+[CacheMon.Service]
+DisplayName=%ServiceDescription%
+Description=%ServiceDescription%
+ServiceBinary=%13%\cachemon.sys
+Dependencies=FltMgr
+ServiceType=2
+StartType=3
+ErrorControl=1
+LoadOrderGroup="FSFilter Activity Monitor"
+AddReg=CacheMon.AddRegistry
+
+[CacheMon.AddRegistry]
+HKR,"Instances","DefaultInstance",0x00000000,%InstanceName%
+HKR,"Instances\%InstanceName%","Altitude",0x00000000,"370030"
+HKR,"Instances\%InstanceName%","Flags",0x00010001,0
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+cachemon.sys=1
+
+[Strings]
+ManufacturerName="ssd-cache"
+ServiceName="CacheMon"
+ServiceDescription="SSD Cache activity monitor minifilter"
+InstanceName="CacheMon Instance"
+DiskName="SSD Cache driver installation media"

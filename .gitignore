@@ -1,0 +1,16 @@
+build/
+out/
+src/driver/x64/
+src/driver/cachemon_minifilter.x64/
+src/driver/cachemon.C2E6D862/
+*.user
+*.suo
+*.obj
+*.pdb
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.log
+*.tmp

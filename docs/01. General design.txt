@@ -1,0 +1,22 @@
+I want to write an application and a windows service in C++. Their purpose is to create a cache disk (usually a usb disk attached to the computer) that caches the files in a network attached storage so that when the NAS is not awailable we can use the cache disk.
+
+The application should be lightweight and should use native tools.
+The plan document should include instructions for an agent about how to download and install the toolss needed to build and deploy the package.
+We should use CMake to control the build process.
+
+The service is tasked with monitoring reads and writes in a certain network disk and add the file that was accessed to a database. If the file already exists the moment is updated. The file is added as a path relative to the disk without the disk letter.
+A separate thread should then copy the file that was accessed to the cache (with low priority, slow pace so that it does not slow down the system). Care should be taken to only copy a file that has been written only after the file has been closed (the write has ended). At least 60 seconds (configurable) should pass between a file being flaged for copy and actual copy. A new access resets that timer.
+
+The database should also retain what file has been added to the cache, when, and store the hash. To this end, so that we do not read the same file twice, computing the hash should be part of the copy opperation. The hash will NOT be used by default when deciding to overwrite an existing file, only the path and the file size will be used. The user can decide in settings to also use the hash with a warning thatthis will slow things down.
+
+The application controls the service. When started, it starts in the tray and has a menu to start-stop the service and to configure the service.
+Configuration include database path (sqlite), source disk, destination disk.
+
+The application should also have a switch for three modes:
+- disabled - does nothing
+- monitor - the network disk is mounted to its own letter, the cache disk must be mounted to its own disk letter
+- serve - the network disk is unmounted, the cache disk is unmounted and then mounted with same letter as the network disk
+
+In this way when the network disk is not available we an use the cache disk instead.
+
+We should determine the size of the cache disk and discard old files when we need more space.

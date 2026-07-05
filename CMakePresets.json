@@ -1,0 +1,134 @@
+{
+  "version": 8,
+  "configurePresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SSD_CACHE_BUILD_TESTS": "ON",
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SSD_CACHE_BUILD_TESTS": "ON",
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "windows-driver-debug",
+      "inherits": "windows-debug",
+      "displayName": "Windows Debug x64 with required WDK driver",
+      "binaryDir": "${sourceDir}/build/windows-driver-debug",
+      "cacheVariables": {
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "windows-driver-debug-msi",
+      "inherits": "windows-driver-debug",
+      "displayName": "Windows Debug x64 with required WDK driver and MSI",
+      "binaryDir": "${sourceDir}/build/windows-driver-debug-msi",
+      "cacheVariables": {
+        "SSD_CACHE_BUILD_INSTALLER": "ON",
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "windows-user-mode-debug",
+      "inherits": "windows-debug",
+      "displayName": "Windows Debug x64 user-mode development only",
+      "binaryDir": "${sourceDir}/build/windows-user-mode-debug",
+      "cacheVariables": {
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-driver-debug",
+      "configurePreset": "windows-driver-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-driver-debug-msi",
+      "configurePreset": "windows-driver-debug-msi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-user-mode-debug",
+      "configurePreset": "windows-user-mode-debug",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-driver-debug",
+      "configurePreset": "windows-driver-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-driver-debug-msi",
+      "configurePreset": "windows-driver-debug-msi",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-user-mode-debug",
+      "configurePreset": "windows-user-mode-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "windows-driver-debug-msi",
+      "configurePreset": "windows-driver-debug-msi",
+      "generators": [
+        "WIX"
+      ],
+      "configurations": [
+        "Debug"
+      ],
+      "packageDirectory": "${sourceDir}/build/packages",
+      "environment": {
+        "PATH": "$penv{USERPROFILE}\\.dotnet\\tools;$penv{PATH}"
+      }
+    }
+  ]
+}

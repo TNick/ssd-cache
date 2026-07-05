@@ -1,0 +1,6 @@
+source_unc=\\nas\share
+source_presentation_letter=N
+cache_letter=K
+sqlite_path=C:\ProgramData\ssd-cache\cache-index.sqlite3
+copy_delay_seconds=60
+compare_hash_before_overwrite=0
