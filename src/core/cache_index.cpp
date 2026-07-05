@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief SQLite implementation of the cache index, plus statement helpers.
+ */
+
 #include "ssd_cache/cache_index.h"
 
 #include <sqlite3.h>
@@ -10,8 +15,20 @@
 namespace ssd_cache {
 namespace {
 
+/**
+ * RAII wrapper around a prepared SQLite statement. Preparation happens in the
+ * constructor (throwing on error) and finalization in the destructor; the bind
+ * and step helpers translate SQLite failures into exceptions.
+ */
 class Statement {
 public:
+    /**
+     * Prepares a statement.
+     *
+     * @param db Open database handle.
+     * @param sql SQL text to prepare.
+     * @throws std::runtime_error if preparation fails.
+     */
     Statement(sqlite3* db, const char* sql) : db_(db) {
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt_, nullptr) != SQLITE_OK) {
             throw std::runtime_error(sqlite3_errmsg(db_));
@@ -25,10 +42,18 @@ public:
         sqlite3_finalize(stmt_);
     }
 
+    /** @return The underlying prepared-statement handle. */
     sqlite3_stmt* get() {
         return stmt_;
     }
 
+    /**
+     * Binds a text parameter.
+     *
+     * @param index 1-based parameter index.
+     * @param value Text value (copied by SQLite).
+     * @throws std::runtime_error on bind failure.
+     */
     void bind_text(int index, std::string_view value) {
         if (sqlite3_bind_text(
                 stmt_,
@@ -41,10 +66,23 @@ public:
         }
     }
 
+    /**
+     * Binds a wide-string parameter, stored as UTF-8.
+     *
+     * @param index 1-based parameter index.
+     * @param value Wide value to convert and bind.
+     */
     void bind_wide(int index, const std::wstring& value) {
         bind_text(index, wide_to_utf8(value));
     }
 
+    /**
+     * Binds a 64-bit integer parameter.
+     *
+     * @param index 1-based parameter index.
+     * @param value Value to bind.
+     * @throws std::runtime_error on bind failure.
+     */
     void bind_int64(int index, std::uint64_t value) {
         if (sqlite3_bind_int64(
                 stmt_,
@@ -55,16 +93,35 @@ public:
         }
     }
 
+    /**
+     * Binds a 32-bit integer parameter.
+     *
+     * @param index 1-based parameter index.
+     * @param value Value to bind.
+     * @throws std::runtime_error on bind failure.
+     */
     void bind_int(int index, int value) {
         if (sqlite3_bind_int(stmt_, index, value) != SQLITE_OK) {
             throw std::runtime_error(sqlite3_errmsg(db_));
         }
     }
 
+    /**
+     * Binds a time point as a whole-second UTC string.
+     *
+     * @param index 1-based parameter index.
+     * @param value Time point to format and bind.
+     */
     void bind_time(int index, std::chrono::system_clock::time_point value) {
         bind_text(index, format_utc(value));
     }
 
+    /**
+     * Steps the statement expecting a row.
+     *
+     * @return True if a row is available (SQLITE_ROW), false at end (SQLITE_DONE).
+     * @throws std::runtime_error on any other result.
+     */
     bool step_row() {
         const int rc = sqlite3_step(stmt_);
         if (rc == SQLITE_ROW) {
@@ -78,6 +135,11 @@ public:
         throw std::runtime_error(sqlite3_errmsg(db_));
     }
 
+    /**
+     * Steps a statement expected to produce no rows (INSERT/UPDATE/DELETE).
+     *
+     * @throws std::runtime_error if the result is not SQLITE_DONE.
+     */
     void step_done() {
         const int rc = sqlite3_step(stmt_);
         if (rc != SQLITE_DONE) {
@@ -90,6 +152,13 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 
+/**
+ * Reads a text column as a std::string.
+ *
+ * @param stmt Statement positioned on a row.
+ * @param column 0-based column index.
+ * @return The column text, or an empty string when NULL.
+ */
 std::string column_text(sqlite3_stmt* stmt, int column) {
     const auto* text = sqlite3_column_text(stmt, column);
     if (text == nullptr) {
@@ -99,6 +168,13 @@ std::string column_text(sqlite3_stmt* stmt, int column) {
     return reinterpret_cast<const char*>(text);
 }
 
+/**
+ * Reads a UTC-timestamp column.
+ *
+ * @param stmt Statement positioned on a row.
+ * @param column 0-based column index.
+ * @return The parsed time point, or nullopt when the column is NULL.
+ */
 std::optional<std::chrono::system_clock::time_point> column_time(
     sqlite3_stmt* stmt,
     int column
@@ -110,6 +186,12 @@ std::optional<std::chrono::system_clock::time_point> column_time(
     return parse_utc(column_text(stmt, column));
 }
 
+/**
+ * Reads a PendingJob from the standard pending-job column order.
+ *
+ * @param stmt Statement positioned on a pending-job row.
+ * @return The populated PendingJob.
+ */
 PendingJob read_pending_job(sqlite3_stmt* stmt) {
     PendingJob job;
     job.relative_path = utf8_to_wide(column_text(stmt, 0));
@@ -125,6 +207,13 @@ PendingJob read_pending_job(sqlite3_stmt* stmt) {
     return job;
 }
 
+/**
+ * Executes one or more SQL statements with no result rows.
+ *
+ * @param db Open database handle.
+ * @param sql SQL text to execute.
+ * @throws std::runtime_error on failure (with SQLite's message).
+ */
 void exec(sqlite3* db, const char* sql) {
     char* error = nullptr;
     const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &error);
@@ -135,6 +224,14 @@ void exec(sqlite3* db, const char* sql) {
     }
 }
 
+/**
+ * Reports whether a table has a given column (used to guard migrations).
+ *
+ * @param db Open database handle.
+ * @param table_name Table to inspect.
+ * @param column_name Column to look for.
+ * @return True if the column exists.
+ */
 bool column_exists(sqlite3* db, const char* table_name, const char* column_name) {
     Statement statement(db, "SELECT name FROM pragma_table_info(?1)");
     statement.bind_text(1, table_name);
@@ -147,6 +244,15 @@ bool column_exists(sqlite3* db, const char* table_name, const char* column_name)
     return false;
 }
 
+/**
+ * Runs an ALTER TABLE only when a column is missing, making migrations
+ * idempotent.
+ *
+ * @param db Open database handle.
+ * @param table_name Table to check.
+ * @param column_name Column whose absence triggers the migration.
+ * @param sql The ALTER TABLE statement to run when the column is missing.
+ */
 void add_column_if_missing(
     sqlite3* db,
     const char* table_name,

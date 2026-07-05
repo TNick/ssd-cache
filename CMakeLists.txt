@@ -30,6 +30,7 @@ target_compile_definitions(
 add_library(
   ssd_cache_core
   src/core/access_event.cpp
+  src/core/cache_eviction.cpp
   src/core/cache_index.cpp
   src/core/config.cpp
   src/core/job_scheduler.cpp
@@ -103,6 +104,7 @@ if(SSD_CACHE_BUILD_TESTS)
 
   add_executable(
     ssd-cache-core-tests
+    tests/core/cache_eviction_test.cpp
     tests/core/cache_index_test.cpp
     tests/core/config_test.cpp
     tests/core/job_scheduler_test.cpp

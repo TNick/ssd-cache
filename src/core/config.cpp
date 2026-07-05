@@ -1,3 +1,9 @@
+/**
+ * @file
+ * @brief Implementation of config parsing/serialization and path/process
+ *        filtering.
+ */
+
 #include "ssd_cache/config.h"
 
 #include <algorithm>
@@ -14,6 +20,12 @@
 namespace ssd_cache {
 namespace {
 
+/**
+ * Trims leading and trailing whitespace.
+ *
+ * @param value String to trim (taken by value and modified in place).
+ * @return The trimmed string.
+ */
 std::wstring trim(std::wstring value) {
     const auto not_space = [](wchar_t ch) {
         return std::iswspace(ch) == 0;
@@ -27,6 +39,12 @@ std::wstring trim(std::wstring value) {
     return value;
 }
 
+/**
+ * Lowercases a string.
+ *
+ * @param value Input string.
+ * @return A lowercased copy of @p value.
+ */
 std::wstring lower_copy(std::wstring_view value) {
     std::wstring lowered(value);
     std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
@@ -35,6 +53,12 @@ std::wstring lower_copy(std::wstring_view value) {
     return lowered;
 }
 
+/**
+ * Extracts the final component of a path.
+ *
+ * @param path Path to inspect (either separator style).
+ * @return The substring after the last separator, or all of @p path if none.
+ */
 std::wstring filename_from_path(std::wstring_view path) {
     const auto last_separator = path.find_last_of(L"\\/");
     if (last_separator == std::wstring_view::npos) {
@@ -44,6 +68,14 @@ std::wstring filename_from_path(std::wstring_view path) {
     return std::wstring(path.substr(last_separator + 1));
 }
 
+/**
+ * Case-insensitive wildcard match supporting `*` (any run) and `?` (any one
+ * character).
+ *
+ * @param pattern Wildcard pattern.
+ * @param value Value to test against @p pattern.
+ * @return True if @p value matches @p pattern.
+ */
 bool wildcard_match_ignore_case(
     std::wstring_view pattern,
     std::wstring_view value
@@ -90,6 +122,13 @@ bool wildcard_match_ignore_case(
     return pattern_index == lowered_pattern.size();
 }
 
+/**
+ * Reads an INI-style file into key/value pairs, skipping blank and `#`-comment
+ * lines and trimming both sides of each `key=value`.
+ *
+ * @param path Path to the file to read.
+ * @return The parsed key/value map (empty if the file cannot be opened).
+ */
 std::map<std::wstring, std::wstring> read_key_values(const std::wstring& path) {
     std::ifstream input{std::filesystem::path(path)};
     if (!input) {
@@ -117,6 +156,14 @@ std::map<std::wstring, std::wstring> read_key_values(const std::wstring& path) {
     return values;
 }
 
+/**
+ * Reads a drive-letter value from a key/value map.
+ *
+ * @param values Parsed key/value map.
+ * @param key Key to read.
+ * @param fallback Letter returned when the key is absent or empty.
+ * @return The upper-cased first character of the value, or @p fallback.
+ */
 wchar_t read_letter(
     const std::map<std::wstring, std::wstring>& values,
     const std::wstring& key,
@@ -130,6 +177,12 @@ wchar_t read_letter(
     return static_cast<wchar_t>(std::towupper(iter->second.front()));
 }
 
+/**
+ * Splits a delimited pattern list on `,` or `;`, trimming and dropping empties.
+ *
+ * @param value The delimited list.
+ * @return The individual, trimmed, non-empty patterns.
+ */
 std::vector<std::wstring> split_patterns(std::wstring_view value) {
     std::vector<std::wstring> patterns;
     std::size_t start = 0;
@@ -155,6 +208,12 @@ std::vector<std::wstring> split_patterns(std::wstring_view value) {
     return patterns;
 }
 
+/**
+ * Joins patterns into a single `;`-delimited string for persistence.
+ *
+ * @param patterns Patterns to join.
+ * @return The `;`-delimited list.
+ */
 std::wstring join_patterns(const std::vector<std::wstring>& patterns) {
     std::wstring result;
     for (const auto& pattern : patterns) {
@@ -168,6 +227,14 @@ std::wstring join_patterns(const std::vector<std::wstring>& patterns) {
     return result;
 }
 
+/**
+ * Tests a value against a list of wildcard patterns, matching either the whole
+ * value or just its final path component.
+ *
+ * @param patterns Patterns to test against.
+ * @param value Value to test (empty never matches).
+ * @return True if any pattern matches @p value or its file name.
+ */
 bool value_matches_any_pattern(
     const std::vector<std::wstring>& patterns,
     std::wstring_view value

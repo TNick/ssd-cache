@@ -1,3 +1,9 @@
+/**
+ * @file
+ * @brief Implementation of the whole-second UTC timestamp format used by the
+ *        cache index.
+ */
+
 #include "ssd_cache/time.h"
 
 #include <array>
@@ -7,6 +13,13 @@
 namespace ssd_cache {
 namespace {
 
+/**
+ * Converts a broken-down UTC time to a time_t, using the platform's gmtime
+ * inverse (there is no portable timegm).
+ *
+ * @param value Broken-down time interpreted as UTC.
+ * @return The corresponding time_t, or (time_t)-1 on failure.
+ */
 std::time_t utc_timegm(std::tm* value) {
 #ifdef _WIN32
     return _mkgmtime(value);

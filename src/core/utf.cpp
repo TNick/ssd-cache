@@ -1,3 +1,11 @@
+/**
+ * @file
+ * @brief Implementation of the UTF-8/UTF-16 and ASCII conversion helpers.
+ *
+ * On Windows the WideChar/MultiByte APIs are used; elsewhere the standard
+ * codecvt facet is used as a portable fallback.
+ */
+
 #include "ssd_cache/utf.h"
 
 #include <algorithm>

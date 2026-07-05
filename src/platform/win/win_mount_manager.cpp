@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of drive mapping/mount helpers and mode presentation.
+ */
+
 #include "ssd_cache/win_mount_manager.h"
 
 #include <array>
@@ -85,6 +90,9 @@ bool remove_drive_mount(wchar_t letter) {
 }
 
 bool WinMountPresentation::enter_monitor_mode(const AppConfig& config) {
+    // If the cache volume is sitting on the presentation letter (from serve
+    // mode), move it back to the cache letter first so the presentation letter
+    // is free for the network mapping.
     const auto source_volume = volume_name_for_drive(
         config.source_presentation_letter
     );
@@ -94,6 +102,7 @@ bool WinMountPresentation::enter_monitor_mode(const AppConfig& config) {
         assign_volume_to_drive(*source_volume, config.cache_letter);
     }
 
+    // Present the source share at the presentation letter.
     return map_network_drive(
         config.source_presentation_letter,
         config.source_unc
@@ -101,13 +110,17 @@ bool WinMountPresentation::enter_monitor_mode(const AppConfig& config) {
 }
 
 bool WinMountPresentation::enter_serve_mode(const AppConfig& config) {
+    // Disconnect the network drive so the presentation letter is free.
     unmap_network_drive(config.source_presentation_letter);
 
+    // Without a cache volume there is nothing to serve.
     const auto cache_volume = volume_name_for_drive(config.cache_letter);
     if (!cache_volume) {
         return false;
     }
 
+    // Move the cache volume from the cache letter onto the presentation letter
+    // so cached files appear where the source normally would.
     remove_drive_mount(config.cache_letter);
     remove_drive_mount(config.source_presentation_letter);
     return assign_volume_to_drive(

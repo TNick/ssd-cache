@@ -36,8 +36,8 @@
   <PropertyGroup>
     <TargetName>cachemon</TargetName>
     <TargetExt>.sys</TargetExt>
-    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(ProjectName).$(Platform)\$(Configuration)\</IntDir>
+    <OutDir>$(ProjectDir)..\..\build\driver\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\build\driver\msbuild\obj\$(Configuration)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>

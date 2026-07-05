@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of ModeManager: dispatches a mode to the presentation.
+ */
+
 #include "ssd_cache/mode_manager.h"
 
 namespace ssd_cache {

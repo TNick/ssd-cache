@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of path normalization and source-path mapping.
+ */
+
 #include "ssd_cache/path_mapper.h"
 
 #include <algorithm>
@@ -6,6 +11,13 @@
 namespace ssd_cache {
 namespace {
 
+/**
+ * Case-insensitive string equality.
+ *
+ * @param left First string.
+ * @param right Second string.
+ * @return True if the strings are equal ignoring case.
+ */
 bool equals_ignore_case(std::wstring_view left, std::wstring_view right) {
     if (left.size() != right.size()) {
         return false;
@@ -20,6 +32,13 @@ bool equals_ignore_case(std::wstring_view left, std::wstring_view right) {
     return true;
 }
 
+/**
+ * Case-insensitive prefix test.
+ *
+ * @param value String to test.
+ * @param prefix Candidate prefix.
+ * @return True if @p value begins with @p prefix, ignoring case.
+ */
 bool starts_with_ignore_case(
     std::wstring_view value,
     std::wstring_view prefix
@@ -31,6 +50,12 @@ bool starts_with_ignore_case(
     return equals_ignore_case(value.substr(0, prefix.size()), prefix);
 }
 
+/**
+ * Lowercases a root string so roots compare case-insensitively as index keys.
+ *
+ * @param value Root string to lowercase.
+ * @return The lowercased root.
+ */
 std::wstring lower_root(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
         return static_cast<wchar_t>(std::towlower(ch));

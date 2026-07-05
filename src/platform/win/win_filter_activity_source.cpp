@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of the minifilter-backed activity source.
+ */
+
 #include "ssd_cache/win_filter_activity_source.h"
 
 #include <algorithm>
@@ -14,16 +19,30 @@
 namespace ssd_cache {
 namespace {
 
+/** A filter message: the required header followed by our event payload. */
 struct CachemonFilterMessage {
     FILTER_MESSAGE_HEADER header;
     CACHEMON_EVENT event;
 };
 
+/**
+ * Copies a fixed-capacity, possibly non-terminated wide field into a string.
+ *
+ * @param value Source characters.
+ * @param limit Maximum characters to read.
+ * @return A string of at most @p limit characters.
+ */
 std::wstring bounded_wstring(const wchar_t* value, std::size_t limit) {
     const std::size_t length = wcsnlen_s(value, limit);
     return std::wstring(value, value + length);
 }
 
+/**
+ * Maps a driver access-kind code to the core AccessKind enum.
+ *
+ * @param kind The CachemonAccess* value from the driver.
+ * @return The corresponding AccessKind (ReadOpen for unknown values).
+ */
 AccessKind convert_kind(std::uint32_t kind) {
     switch (kind) {
         case CachemonAccessReadOpen:
@@ -41,6 +60,15 @@ AccessKind convert_kind(std::uint32_t kind) {
     }
 }
 
+/**
+ * Copies a wide string into a fixed-size buffer, truncating and always
+ * null-terminating.
+ *
+ * @param destination Destination buffer.
+ * @param destination_count Capacity of @p destination in wchar_t; zero is a
+ *        no-op.
+ * @param source Source string.
+ */
 void copy_bounded_wide(
     wchar_t* destination,
     std::size_t destination_count,
@@ -68,10 +96,12 @@ WinFilterActivitySource::~WinFilterActivitySource() {
 }
 
 void WinFilterActivitySource::start() {
+    // Already started.
     if (reader_.joinable()) {
         return;
     }
 
+    // Connect to the driver's communication port.
     HRESULT hr = FilterConnectCommunicationPort(
         CACHEMON_PORT_NAME,
         0,
@@ -84,6 +114,8 @@ void WinFilterActivitySource::start() {
         throw std::runtime_error("failed to connect to CacheMon minifilter");
     }
 
+    // Register this process as the service so the driver ignores our own I/O,
+    // and tell it where to log.
     CACHEMON_COMMAND command{};
     command.version = CACHEMON_COMMAND_VERSION;
     command.command = CachemonCommandRegisterService;
@@ -114,6 +146,7 @@ void WinFilterActivitySource::start() {
         throw std::runtime_error("failed to register service with minifilter");
     }
 
+    // Start pulling events on a background thread.
     stop_requested_ = false;
     reader_ = std::thread([this]() {
         reader_loop();
@@ -139,6 +172,7 @@ void WinFilterActivitySource::stop() {
 
 void WinFilterActivitySource::reader_loop() {
     while (!stop_requested_) {
+        // Block waiting for the next event from the driver.
         CachemonFilterMessage message{};
         const HRESULT hr = FilterGetMessage(
             port_,
@@ -147,6 +181,7 @@ void WinFilterActivitySource::reader_loop() {
             nullptr
         );
 
+        // On error, exit if we're stopping; otherwise back off briefly and retry.
         if (FAILED(hr)) {
             if (stop_requested_) {
                 return;
@@ -156,10 +191,12 @@ void WinFilterActivitySource::reader_loop() {
             continue;
         }
 
+        // Ignore messages from an incompatible driver version.
         if (message.event.version != CACHEMON_EVENT_VERSION) {
             continue;
         }
 
+        // Extract the (fixed-capacity) root and relative path fields.
         AccessEvent event;
         event.source_root_id = bounded_wstring(
             message.event.source_root_id,
@@ -170,6 +207,8 @@ void WinFilterActivitySource::reader_loop() {
             CACHEMON_MAX_RELATIVE_CHARS
         );
 
+        // Map the observed path onto the configured source root; drop events
+        // that don't belong to it (unless the driver gave no root at all).
         const auto mapped = map_observed_source_path(
             source_unc_,
             event.source_root_id.empty() ? event.relative_path :
@@ -182,6 +221,7 @@ void WinFilterActivitySource::reader_loop() {
             continue;
         }
 
+        // Fill in the remaining fields and hand the event to the callback.
         event.kind = convert_kind(message.event.kind);
         event.size_hint = message.event.size_hint;
         event.requestor_pid = message.event.requestor_pid;

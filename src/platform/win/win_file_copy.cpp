@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of the throttled, hashing Windows copy engine.
+ */
+
 #include "ssd_cache/win_file_copy.h"
 
 #include <array>
@@ -17,6 +22,7 @@
 namespace ssd_cache {
 namespace {
 
+/** RAII wrapper around a Win32 file HANDLE, with early reset support. */
 class Handle {
 public:
     explicit Handle(HANDLE handle = INVALID_HANDLE_VALUE) : handle_(handle) {}
@@ -52,10 +58,15 @@ private:
     HANDLE handle_;
 };
 
-// Render a Win32 error code as "<code> (<message>)" for logging and the
-// cache index's last_error column. FormatMessage gives the same human-readable
-// text the system uses (e.g. "The process cannot access the file because it is
-// being used by another process."), trimmed of its trailing newline.
+/**
+ * Renders a Win32 error code as "<code> (<message>)" for logging and the cache
+ * index's last_error column. FormatMessage gives the same human-readable text
+ * the system uses (e.g. "The process cannot access the file because it is being
+ * used by another process."), trimmed of its trailing newline.
+ *
+ * @param error The Win32 error code.
+ * @return The formatted, human-readable description.
+ */
 std::string describe_error(DWORD error) {
     LPWSTR text = nullptr;
     const DWORD length = FormatMessageW(
@@ -90,6 +101,7 @@ std::string describe_error(DWORD error) {
     return result;
 }
 
+/** RAII wrapper for a BCrypt SHA-256 algorithm provider. */
 class BCryptAlgorithm {
 public:
     BCryptAlgorithm() {
@@ -121,6 +133,7 @@ private:
     BCRYPT_ALG_HANDLE algorithm_ = nullptr;
 };
 
+/** RAII SHA-256 hash object; feed it with update() and finish with finish_hex(). */
 class BCryptHash {
 public:
     explicit BCryptHash(const BCryptAlgorithm& algorithm) : algorithm_(algorithm) {
@@ -174,6 +187,13 @@ public:
         }
     }
 
+    /**
+     * Feeds bytes into the running hash.
+     *
+     * @param data Buffer holding the bytes.
+     * @param size Number of leading bytes of @p data to hash.
+     * @throws std::runtime_error on hashing failure.
+     */
     void update(const std::vector<std::byte>& data, DWORD size) {
         const NTSTATUS status = BCryptHashData(
             hash_,
@@ -186,6 +206,12 @@ public:
         }
     }
 
+    /**
+     * Finalizes the hash and returns it as a lowercase hex string.
+     *
+     * @return The hex-encoded SHA-256 digest.
+     * @throws std::runtime_error on failure.
+     */
     std::string finish_hex() {
         std::vector<unsigned char> digest(hash_length_);
         const NTSTATUS status = BCryptFinishHash(
@@ -216,6 +242,13 @@ private:
     DWORD hash_length_ = 0;
 };
 
+/**
+ * Prefixes a path with the extended-length (\\?\) form so long paths and UNC
+ * paths work with the Win32 file APIs.
+ *
+ * @param path A normal Win32 path.
+ * @return The \\?\-prefixed equivalent (already-prefixed paths pass through).
+ */
 std::wstring extended_path(const std::wstring& path) {
     if (path.starts_with(L"\\\\?\\")) {
         return path;
@@ -228,15 +261,26 @@ std::wstring extended_path(const std::wstring& path) {
     return L"\\\\?\\" + path;
 }
 
+/**
+ * @param error A Win32 error code.
+ * @return True if the error means the file/path was not found.
+ */
 bool is_missing_error(DWORD error) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
 }
 
+/** File size lookup result: the size on success, or the failing Win32 error. */
 struct FileSizeResult {
     std::optional<std::uint64_t> size;
     DWORD error = ERROR_SUCCESS;
 };
 
+/**
+ * Queries a file's size.
+ *
+ * @param path Path to the file.
+ * @return The size on success, or the failing error code (size unset).
+ */
 FileSizeResult file_size_bytes(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(
@@ -256,6 +300,11 @@ FileSizeResult file_size_bytes(const std::wstring& path) {
     };
 }
 
+/**
+ * Creates the parent directory chain for a destination file.
+ *
+ * @param path Destination file path whose parent directories are created.
+ */
 void ensure_destination_directory(const std::wstring& path) {
     const std::filesystem::path file_path(path);
     if (file_path.has_parent_path()) {
@@ -263,6 +312,11 @@ void ensure_destination_directory(const std::wstring& path) {
     }
 }
 
+/**
+ * Lowers a handle's I/O priority so copying does not compete with foreground I/O.
+ *
+ * @param handle File handle to deprioritize.
+ */
 void set_low_io_priority(HANDLE handle) {
     FILE_IO_PRIORITY_HINT_INFO priority{};
     priority.PriorityHint = IoPriorityHintVeryLow;
@@ -274,6 +328,12 @@ void set_low_io_priority(HANDLE handle) {
     );
 }
 
+/**
+ * Opens an existing file for sequential reading, shared for read/write/delete.
+ *
+ * @param path Path to open.
+ * @return A Handle (invalid on failure; check with valid()).
+ */
 Handle open_existing_for_read(const std::wstring& path) {
     return Handle(CreateFileW(
         extended_path(path).c_str(),
@@ -286,6 +346,14 @@ Handle open_existing_for_read(const std::wstring& path) {
     ));
 }
 
+/**
+ * Computes the SHA-256 of an existing file by streaming it in chunks.
+ *
+ * @param path Path to the file to hash.
+ * @param chunk_size Read buffer size in bytes.
+ * @return The hex-encoded digest.
+ * @throws std::runtime_error if the file cannot be opened or read.
+ */
 std::string hash_existing_file(
     const std::wstring& path,
     std::size_t chunk_size
@@ -322,6 +390,11 @@ std::string hash_existing_file(
     return hash.finish_hex();
 }
 
+/**
+ * RAII helper that puts the current thread into background processing mode
+ * (lower CPU/I/O priority) for the duration of a copy, restoring it on scope
+ * exit.
+ */
 class BackgroundThreadMode {
 public:
     BackgroundThreadMode() {
@@ -358,6 +431,8 @@ CopyResult WinFileCopyEngine::copy_and_hash(
     CopyResult result;
     result.completed_at = std::chrono::system_clock::now();
 
+    // Inspect the source: a missing source and a genuine error are distinct
+    // outcomes the caller handles differently.
     const auto source_size = file_size_bytes(source_abs);
     if (!source_size.size) {
         if (is_missing_error(source_size.error)) {
@@ -375,6 +450,8 @@ CopyResult WinFileCopyEngine::copy_and_hash(
         return result;
     }
 
+    // If a cache copy already exists and matches, skip the work: by size alone,
+    // or by hash when the caller asked for a stronger check.
     result.source_size_bytes = *source_size.size;
     const auto cache_size = file_size_bytes(cache_abs);
     if (cache_size.size) {
@@ -399,9 +476,12 @@ CopyResult WinFileCopyEngine::copy_and_hash(
     }
 
     try {
+        // Write to a temp file first so the final cache file appears atomically
+        // via a rename at the end.
         ensure_destination_directory(cache_abs);
         const std::wstring temp_path = cache_abs + L".ssd-cache.tmp";
 
+        // Open the source for reading.
         Handle source = open_existing_for_read(source_abs);
         if (!source.valid()) {
             const DWORD open_error = GetLastError();
@@ -419,6 +499,7 @@ CopyResult WinFileCopyEngine::copy_and_hash(
             return result;
         }
 
+        // Create the exclusive temp destination.
         Handle destination(CreateFileW(
             extended_path(temp_path).c_str(),
             GENERIC_WRITE,
@@ -437,6 +518,7 @@ CopyResult WinFileCopyEngine::copy_and_hash(
             return result;
         }
 
+        // Run the copy at low I/O and background priority, hashing as we go.
         set_low_io_priority(source.get());
         set_low_io_priority(destination.get());
         BackgroundThreadMode background;
@@ -444,7 +526,9 @@ CopyResult WinFileCopyEngine::copy_and_hash(
         BCryptHash hash(algorithm);
         std::vector<std::byte> buffer(chunk_size_);
 
+        // Copy loop: read a chunk, hash it, write it, repeat until EOF.
         while (true) {
+            // Abort promptly if asked to cancel, discarding the temp file.
             if (cancelled.load()) {
                 destination.reset();
                 DeleteFileW(extended_path(temp_path).c_str());
@@ -453,6 +537,7 @@ CopyResult WinFileCopyEngine::copy_and_hash(
                 return result;
             }
 
+            // Read the next chunk; a vanished source is distinct from an error.
             DWORD read = 0;
             if (!ReadFile(
                     source.get(),
@@ -478,10 +563,12 @@ CopyResult WinFileCopyEngine::copy_and_hash(
                 return result;
             }
 
+            // End of file.
             if (read == 0) {
                 break;
             }
 
+            // Hash then write the chunk; a short write is treated as failure.
             hash.update(buffer, read);
 
             DWORD written = 0;
@@ -501,11 +588,13 @@ CopyResult WinFileCopyEngine::copy_and_hash(
                 return result;
             }
 
+            // Throttle between chunks to keep copy throughput gentle.
             if (sleep_between_chunks_.count() > 0) {
                 Sleep(static_cast<DWORD>(sleep_between_chunks_.count()));
             }
         }
 
+        // Finalize the hash and record sizes/time.
         result.hash_hex = hash.finish_hex();
         result.cached_size_bytes = *source_size.size;
         result.completed_at = std::chrono::system_clock::now();
@@ -516,6 +605,7 @@ CopyResult WinFileCopyEngine::copy_and_hash(
         source.reset();
         destination.reset();
 
+        // Atomically publish the temp file as the final cache file.
         if (!MoveFileExW(
                 extended_path(temp_path).c_str(),
                 extended_path(cache_abs).c_str(),

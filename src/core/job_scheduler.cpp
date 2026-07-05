@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of the pending-copy scheduler and its worker loop.
+ */
+
 #include "ssd_cache/job_scheduler.h"
 
 #include <algorithm>
@@ -11,18 +16,31 @@
 namespace ssd_cache {
 namespace {
 
-// The cache index persists timestamps at whole-second resolution (see
-// format_utc). Heap entries, however, are built from system_clock::now() which
-// carries sub-second precision, so an in-memory due time would never compare
-// equal to the same job reloaded from the database. Flooring every due time to
-// seconds before it enters the heap keeps the two representations identical,
-// which the worker relies on to tell a live job apart from a stale heap entry.
+/**
+ * Floors a time point to whole seconds.
+ *
+ * The cache index persists timestamps at whole-second resolution (see
+ * format_utc). Heap entries, however, are built from system_clock::now() which
+ * carries sub-second precision, so an in-memory due time would never compare
+ * equal to the same job reloaded from the database. Flooring every due time to
+ * seconds before it enters the heap keeps the two representations identical,
+ * which the worker relies on to tell a live job apart from a stale heap entry.
+ *
+ * @param value Time point to floor.
+ * @return @p value truncated to whole seconds.
+ */
 std::chrono::system_clock::time_point floor_to_seconds(
     std::chrono::system_clock::time_point value
 ) {
     return std::chrono::time_point_cast<std::chrono::seconds>(value);
 }
 
+/**
+ * Maps a copy action to a short label for logging.
+ *
+ * @param action The action to name.
+ * @return A static, human-readable label such as "copied" or "failed".
+ */
 const char* copy_action_name(CopyAction action) {
     switch (action) {
         case CopyAction::Copied:
@@ -42,6 +60,12 @@ const char* copy_action_name(CopyAction action) {
     return "unknown";
 }
 
+/**
+ * Narrows a relative path to UTF-8 for logging.
+ *
+ * @param relative_path Wide relative path.
+ * @return The UTF-8 encoding of @p relative_path.
+ */
 std::string narrow_path(const std::wstring& relative_path) {
     return wide_to_utf8(relative_path);
 }

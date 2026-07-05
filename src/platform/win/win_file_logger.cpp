@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of the file-backed logger (timestamping, append, ACL).
+ */
+
 #include "ssd_cache/win_file_logger.h"
 
 #include <filesystem>
@@ -14,11 +19,19 @@
 namespace ssd_cache {
 namespace {
 
+/**
+ * @return A process-wide mutex serializing writes to the log file.
+ */
 std::mutex& log_mutex() {
     static std::mutex mutex;
     return mutex;
 }
 
+/**
+ * Builds a local-time log-line prefix.
+ *
+ * @return A prefix of the form "[YYYY-MM-DD HH:MM:SS] ".
+ */
 std::string timestamp_prefix() {
     SYSTEMTIME now{};
     GetLocalTime(&now);
@@ -44,6 +57,8 @@ void WinFileLogger::log(const std::string& message) noexcept {
     HANDLE handle = INVALID_HANDLE_VALUE;
 
     try {
+        // Compose the line and make sure the target directory (and, if it
+        // already exists, the file's ACL) are in place.
         const auto line = timestamp_prefix() + message + '\n';
         ensure_parent_directory(path_);
         if (std::filesystem::exists(std::filesystem::path(path_))) {
@@ -53,6 +68,7 @@ void WinFileLogger::log(const std::string& message) noexcept {
             }
         }
 
+        // Open for append under the lock so concurrent loggers do not interleave.
         const std::lock_guard<std::mutex> lock(log_mutex());
         handle = CreateFileW(
             path_.c_str(),
@@ -70,11 +86,14 @@ void WinFileLogger::log(const std::string& message) noexcept {
             return;
         }
 
+        // Now that the file certainly exists, (re)apply the service-account ACL.
         try {
             ensure_network_service_access(path_, false);
         } catch (...) {
         }
 
+        // Append the line; report failures to the debugger only (log() must not
+        // throw or otherwise disrupt its caller).
         DWORD bytes_written = 0;
         const BOOL ok = WriteFile(
             handle,

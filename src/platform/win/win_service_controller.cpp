@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of service/driver state queries and SCM control.
+ */
+
 #include "ssd_cache/win_service_controller.h"
 
 #include <cstddef>
@@ -12,6 +17,7 @@ namespace {
 
 constexpr const wchar_t* kLocalSystemAccount = L"LocalSystem";
 
+/** RAII wrapper that closes an SCM handle on destruction. */
 class ScHandle {
 public:
     explicit ScHandle(SC_HANDLE handle) : handle_(handle) {}
@@ -33,6 +39,7 @@ private:
     SC_HANDLE handle_ = nullptr;
 };
 
+/** RAII wrapper that closes a filter-enumeration handle on destruction. */
 class FilterFindHandle {
 public:
     explicit FilterFindHandle(HANDLE handle) : handle_(handle) {}
@@ -54,6 +61,12 @@ private:
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 };
 
+/**
+ * Maps an app mode to its custom SCM control code.
+ *
+ * @param mode The mode to map.
+ * @return The corresponding kServiceControl* code.
+ */
 DWORD control_code_for_mode(AppMode mode) {
     switch (mode) {
         case AppMode::Disabled:
@@ -67,10 +80,24 @@ DWORD control_code_for_mode(AppMode mode) {
     return kServiceControlDisabledMode;
 }
 
+/**
+ * Wraps a path in double quotes for use in a service binary command line.
+ *
+ * @param path Path to quote.
+ * @return The quoted path.
+ */
 std::wstring quoted_path(const std::wstring& path) {
     return L"\"" + path + L"\"";
 }
 
+/**
+ * Opens a service handle.
+ *
+ * @param manager Open SCM handle.
+ * @param service_name Service to open.
+ * @param access Desired access mask.
+ * @return The service handle, or nullptr on failure.
+ */
 SC_HANDLE open_service_handle(
     SC_HANDLE manager,
     const std::wstring& service_name,
@@ -79,6 +106,13 @@ SC_HANDLE open_service_handle(
     return OpenServiceW(manager, service_name.c_str(), access);
 }
 
+/**
+ * Checks that a service can be opened for status query (i.e. it exists).
+ *
+ * @param manager Open SCM handle.
+ * @param service_name Service to check.
+ * @return True if the service exists.
+ */
 bool verify_service_exists(
     SC_HANDLE manager,
     const std::wstring& service_name
@@ -91,6 +125,13 @@ bool verify_service_exists(
     return service.get() != nullptr;
 }
 
+/**
+ * Compares a filter enumeration entry's name against a target, case-insensitive.
+ *
+ * @param info Filter information entry.
+ * @param filter_name Target filter name.
+ * @return True if the entry names the target filter.
+ */
 bool matches_filter_name(
     const FILTER_FULL_INFORMATION* info,
     const std::wstring& filter_name
@@ -105,6 +146,14 @@ bool matches_filter_name(
         ) == 0;
 }
 
+/**
+ * Scans a filter-enumeration buffer (a chain of variable-length entries) for a
+ * filter by name.
+ *
+ * @param buffer Buffer of FILTER_FULL_INFORMATION entries.
+ * @param filter_name Target filter name.
+ * @return True if the target filter is present in the buffer.
+ */
 bool buffer_contains_filter(
     const void* buffer,
     const std::wstring& filter_name
@@ -130,6 +179,12 @@ bool buffer_contains_filter(
     return false;
 }
 
+/**
+ * Enumerates the loaded minifilters and reports whether one is present.
+ *
+ * @param filter_name Filter name to look for.
+ * @return True if a filter with that name is currently loaded.
+ */
 bool find_loaded_filter(const std::wstring& filter_name) {
     std::vector<std::byte> buffer(4096);
     DWORD bytes_returned = 0;
@@ -202,6 +257,12 @@ bool find_loaded_filter(const std::wstring& filter_name) {
     }
 }
 
+/**
+ * Maps a Win32 SERVICE_* state to a ServiceState.
+ *
+ * @param state A dwCurrentState value.
+ * @return The corresponding ServiceState (Stopped for unrecognized states).
+ */
 ServiceState convert_service_state(DWORD state) {
     switch (state) {
         case SERVICE_RUNNING:
@@ -268,6 +329,7 @@ ServiceState query_service_state(const std::wstring& service_name) {
 }
 
 ServiceState query_driver_state() {
+    // Trust a definitive SCM answer when there is one.
     const auto service_state = query_service_state(kDriverServiceName);
     if (service_state == ServiceState::Missing ||
         service_state == ServiceState::StartPending ||
@@ -276,6 +338,8 @@ ServiceState query_driver_state() {
         return service_state;
     }
 
+    // The SCM may report a demand-loaded minifilter as stopped even while it is
+    // loaded, so fall back to enumerating loaded filters.
     if (find_loaded_filter(kDriverServiceName)) {
         return ServiceState::Running;
     }
@@ -311,14 +375,17 @@ bool WinServiceController::install_service(
         nullptr
     ));
 
+    // Fresh install succeeded.
     if (service.get() != nullptr) {
         return verify_service_exists(manager.get(), service_name_);
     }
 
+    // Anything other than "already exists" is a real failure.
     if (GetLastError() != ERROR_SERVICE_EXISTS) {
         return false;
     }
 
+    // Already installed: reconfigure the existing service's binary path/account.
     ScHandle existing_service(open_service_handle(
         manager.get(),
         service_name_,

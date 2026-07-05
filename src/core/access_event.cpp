@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Access-kind string conversions and copy-scheduling policy.
+ */
+
 #include "ssd_cache/access_event.h"
 
 #include <stdexcept>

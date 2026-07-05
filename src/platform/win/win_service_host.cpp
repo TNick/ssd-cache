@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Implementation of the service host: SCM plumbing and worker pipeline.
+ */
+
 #include "ssd_cache/win_service_host.h"
 
 #include <algorithm>
@@ -25,8 +30,10 @@
 namespace ssd_cache {
 namespace {
 
+/** The single live host, used by the SCM thunks to reach the instance. */
 WinServiceHost* g_service = nullptr;
 
+/** RAII wrapper closing a Win32 HANDLE (tolerates null/invalid) on destruction. */
 class OwnedHandle {
 public:
     explicit OwnedHandle(HANDLE handle) : handle_(handle) {}
@@ -48,16 +55,25 @@ private:
     HANDLE handle_ = nullptr;
 };
 
+/** Resolves relative paths against the configured source UNC and cache root. */
 class RootedPathResolver final : public ICopyPathResolver {
 public:
     explicit RootedPathResolver(AppConfig config) : config_(std::move(config)) {}
 
+    /**
+     * @param relative_path Path relative to the source root.
+     * @return The absolute source path.
+     */
     std::wstring source_absolute(
         const std::wstring& relative_path
     ) const override {
         return join_root_relative(config_.source_unc, relative_path);
     }
 
+    /**
+     * @param relative_path Path relative to the cache root.
+     * @return The absolute cache path.
+     */
     std::wstring cache_absolute(
         const std::wstring& relative_path
     ) const override {
@@ -68,12 +84,27 @@ private:
     AppConfig config_;
 };
 
+/**
+ * SCM ServiceMain trampoline that forwards to the live host instance.
+ *
+ * @param argc Service argument count.
+ * @param argv Service argument vector.
+ */
 void WINAPI service_main_thunk(DWORD argc, wchar_t** argv) {
     if (g_service != nullptr) {
         g_service->service_main(argc, argv);
     }
 }
 
+/**
+ * SCM control-handler trampoline that forwards to the live host instance.
+ *
+ * @param control Control code.
+ * @param event_type Control-specific event type.
+ * @param event_data Control-specific event data.
+ * @param context Registered handler context.
+ * @return The host's handler result, or ERROR_CALL_NOT_IMPLEMENTED if no host.
+ */
 DWORD WINAPI handler_thunk(
     DWORD control,
     DWORD event_type,
@@ -92,13 +123,25 @@ DWORD WINAPI handler_thunk(
     );
 }
 
+/**
+ * Decides whether a mode should have caching active.
+ *
+ * @param mode The mode to test (nullopt means unset).
+ * @return True for Monitor mode or an unset mode (which preserves the historical
+ *         default of caching whenever a source is configured); false for
+ *         Disabled and Serve.
+ */
 bool mode_enables_caching(const std::optional<AppMode>& mode) {
-    // Caching runs in Monitor mode. An unset mode preserves the historical
-    // default of caching whenever a source is configured; Disabled and Serve
-    // stop it.
     return !mode.has_value() || *mode == AppMode::Monitor;
 }
 
+/**
+ * Loads the config, creating it with defaults (and a default SQLite path) when
+ * the file does not yet exist.
+ *
+ * @param path Path to the config file.
+ * @return The loaded or newly created configuration.
+ */
 AppConfig load_or_create_config(const std::wstring& path) {
     AppConfig config;
     config.sqlite_path = default_sqlite_path();
@@ -115,6 +158,13 @@ AppConfig load_or_create_config(const std::wstring& path) {
     return config;
 }
 
+/**
+ * Moves the cache volume off the presentation letter back to the cache letter
+ * (the machine-global half of a switch into Monitor mode).
+ *
+ * @param config Source/cache drive letters.
+ * @return True on success or when no move is needed.
+ */
 bool move_cache_to_monitor_letter(const AppConfig& config) {
     const auto source_volume = volume_name_for_drive(
         config.source_presentation_letter
@@ -128,6 +178,13 @@ bool move_cache_to_monitor_letter(const AppConfig& config) {
     return assign_volume_to_drive(*source_volume, config.cache_letter);
 }
 
+/**
+ * Moves the cache volume onto the presentation letter (the machine-global half
+ * of a switch into Serve mode).
+ *
+ * @param config Source/cache drive letters.
+ * @return True on success, false if there is no cache volume to move.
+ */
 bool move_cache_to_source_letter(const AppConfig& config) {
     const auto cache_volume = volume_name_for_drive(config.cache_letter);
     if (!cache_volume) {
@@ -142,6 +199,12 @@ bool move_cache_to_source_letter(const AppConfig& config) {
     );
 }
 
+/**
+ * Prefixes a path with the extended-length (\\?\) form for the Win32 file APIs.
+ *
+ * @param path A normal Win32 path.
+ * @return The \\?\-prefixed equivalent (already-prefixed paths pass through).
+ */
 std::wstring extended_path(std::wstring_view path) {
     std::wstring value(path);
     if (value.starts_with(L"\\\\?\\")) {
@@ -155,6 +218,13 @@ std::wstring extended_path(std::wstring_view path) {
     return L"\\\\?\\" + value;
 }
 
+/**
+ * Tests whether a relative path names a directory on the source.
+ *
+ * @param config Configuration providing the source UNC.
+ * @param relative_path Path relative to the source root.
+ * @return True if the path exists on the source and is a directory.
+ */
 bool source_path_is_directory(
     const AppConfig& config,
     const std::wstring& relative_path
@@ -174,6 +244,14 @@ bool source_path_is_directory(
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
+/**
+ * Purges stale/invalid records at startup: the empty-path sentinel, paths that
+ * now match ignore patterns, and paths that are actually directories.
+ *
+ * @param cache_index Index to clean.
+ * @param config Configuration providing filters and the source UNC.
+ * @param logger Optional log sink; may be null.
+ */
 void cleanup_invalid_cache_records(
     CacheIndex& cache_index,
     const AppConfig& config,
@@ -222,6 +300,12 @@ void cleanup_invalid_cache_records(
     }
 }
 
+/**
+ * Resolves a process id to its image path.
+ *
+ * @param pid Process id (0 or out-of-range yields an empty result).
+ * @return The process image path, or an empty string if it cannot be obtained.
+ */
 std::string requestor_process_path(std::uint64_t pid) {
     if (pid == 0 || pid > std::numeric_limits<DWORD>::max()) {
         return {};
@@ -251,12 +335,24 @@ std::string requestor_process_path(std::uint64_t pid) {
     return wide_to_utf8(std::wstring(image_path.data(), image_path_size));
 }
 
+/**
+ * Returns a copy of an event with its requestor_process image path filled in.
+ *
+ * @param event The event to enrich.
+ * @return The enriched copy.
+ */
 AccessEvent with_requestor_process(const AccessEvent& event) {
     auto enriched = event;
     enriched.requestor_process = requestor_process_path(event.requestor_pid);
     return enriched;
 }
 
+/**
+ * Formats the requestor (pid and, if known, process image) for a log line.
+ *
+ * @param event The event whose requestor is described.
+ * @return A label such as "pid=1234 process='C:\\...\\app.exe'".
+ */
 std::string requestor_process_label(const AccessEvent& event) {
     std::string label = "pid=" + std::to_string(event.requestor_pid);
     if (!event.requestor_process.empty()) {
@@ -266,12 +362,28 @@ std::string requestor_process_label(const AccessEvent& event) {
     return label;
 }
 
+/**
+ * Formats a one-line description of an activity event for logging.
+ *
+ * @param event The event to describe.
+ * @return The formatted log message.
+ */
 std::string activity_event_message(const AccessEvent& event) {
     return "driver event " + access_kind_to_string(event.kind) + ": '" +
         wide_to_utf8(event.relative_path) + "' from " +
         requestor_process_label(event);
 }
 
+/**
+ * Decides whether an activity event should be dropped rather than scheduled,
+ * logging the reason when it is.
+ *
+ * @param config Configuration providing the filters and source UNC.
+ * @param event The enriched activity event.
+ * @param logger Optional log sink; may be null.
+ * @return True if the event should be ignored (empty path, filtered path or
+ *         process, or a directory).
+ */
 bool should_ignore_activity_event(
     const AppConfig& config,
     const AccessEvent& event,
@@ -436,6 +548,8 @@ DWORD WinServiceHost::handle_control(
         return NO_ERROR;
     }
 
+    // The remaining custom controls switch modes: each performs any drive-letter
+    // move, persists the new mode, and applies it to the live pipeline.
     auto config = load_or_create_config(config_path_);
     if (control == kServiceControlDisabledMode) {
         logger_->log("Service switched to disabled mode.");
@@ -473,6 +587,7 @@ DWORD WinServiceHost::handle_control(
 }
 
 void WinServiceHost::run_worker() {
+    // Load configuration and open the cache index, pruning stale records.
     const auto config = load_or_create_config(config_path_);
     ensure_parent_directory(config.sqlite_path);
     logger_->log("Service loaded configuration.");
@@ -482,6 +597,8 @@ void WinServiceHost::run_worker() {
     logger_->log("Service opened cache index.");
     cleanup_invalid_cache_records(cache_index, config, logger_.get());
 
+    // Build the copy scheduler from the copy engine, path resolver, free-space
+    // provider and the settings derived from config.
     WinFileCopyEngine copy_engine;
     WinFreeSpaceProvider free_space;
     RootedPathResolver path_resolver(config);
@@ -500,6 +617,9 @@ void WinServiceHost::run_worker() {
         &free_space
     );
     scheduler.start();
+
+    // Publish the scheduler for the control thread and apply the startup mode
+    // (pausing it immediately unless we start in Monitor mode).
 
     {
         std::lock_guard lock(scheduler_mutex_);
