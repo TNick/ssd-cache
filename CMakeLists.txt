@@ -42,10 +42,18 @@ target_include_directories(ssd_cache_core PUBLIC src/core/include)
 target_link_libraries(ssd_cache_core PUBLIC sqlite3)
 
 if(WIN32)
+  set(
+    SSD_CACHE_TRAY_ICON_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/tray_icons/driver_running.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/tray_icons/driver_warning.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/tray_icons/driver_missing.png"
+  )
+
   add_library(
     ssd_cache_win
     src/platform/win/win_config_paths.cpp
     src/platform/win/win_file_copy.cpp
+    src/platform/win/win_file_logger.cpp
     src/platform/win/win_filter_activity_source.cpp
     src/platform/win/win_mount_manager.cpp
     src/platform/win/win_service_controller.cpp
@@ -68,7 +76,26 @@ if(WIN32)
   target_link_libraries(ssd-cache-service PRIVATE ssd_cache_core ssd_cache_win)
 
   add_executable(ssd-cache-tray WIN32 src/app/tray_main.cpp)
-  target_link_libraries(ssd-cache-tray PRIVATE ssd_cache_core ssd_cache_win)
+  target_link_libraries(
+    ssd-cache-tray
+    PRIVATE
+      ssd_cache_core
+      ssd_cache_win
+      Gdiplus
+  )
+  foreach(icon_file IN LISTS SSD_CACHE_TRAY_ICON_FILES)
+    add_custom_command(
+      TARGET ssd-cache-tray
+      POST_BUILD
+      COMMAND
+        "${CMAKE_COMMAND}"
+        -E
+        copy_if_different
+        "${icon_file}"
+        "$<TARGET_FILE_DIR:ssd-cache-tray>"
+      VERBATIM
+    )
+  endforeach()
 endif()
 
 if(SSD_CACHE_BUILD_TESTS)
@@ -77,6 +104,7 @@ if(SSD_CACHE_BUILD_TESTS)
   add_executable(
     ssd-cache-core-tests
     tests/core/cache_index_test.cpp
+    tests/core/config_test.cpp
     tests/core/job_scheduler_test.cpp
     tests/core/path_mapper_test.cpp
     tests/test_main.cpp
@@ -130,6 +158,7 @@ endif()
 
 if(TARGET ssd_cache_win)
   install(TARGETS ssd-cache-service ssd-cache-tray RUNTIME DESTINATION bin)
+  install(FILES ${SSD_CACHE_TRAY_ICON_FILES} DESTINATION bin)
   install(FILES README.md DESTINATION .)
   install(FILES config/config.ini.sample DESTINATION config)
   install(FILES scripts/install-driver.ps1 DESTINATION tools)

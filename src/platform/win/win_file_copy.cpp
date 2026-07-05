@@ -4,7 +4,10 @@
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+#include "ssd_cache/utf.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -35,9 +38,57 @@ public:
         return handle_ != INVALID_HANDLE_VALUE;
     }
 
+    // Close the wrapped handle early. Required before renaming the temp file:
+    // it is opened with an exclusive share mode, so MoveFileExW would fail with
+    // a sharing violation while the handle is still open.
+    void reset() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+    }
+
 private:
     HANDLE handle_;
 };
+
+// Render a Win32 error code as "<code> (<message>)" for logging and the
+// cache index's last_error column. FormatMessage gives the same human-readable
+// text the system uses (e.g. "The process cannot access the file because it is
+// being used by another process."), trimmed of its trailing newline.
+std::string describe_error(DWORD error) {
+    LPWSTR text = nullptr;
+    const DWORD length = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        error,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        reinterpret_cast<LPWSTR>(&text),
+        0,
+        nullptr
+    );
+
+    std::wstring message;
+    if (length != 0 && text != nullptr) {
+        message.assign(text, length);
+    }
+    if (text != nullptr) {
+        LocalFree(text);
+    }
+
+    while (!message.empty() &&
+           (message.back() == L'\r' || message.back() == L'\n' ||
+            message.back() == L'.' || message.back() == L' ')) {
+        message.pop_back();
+    }
+
+    std::string result = std::to_string(error);
+    if (!message.empty()) {
+        result += " (" + wide_to_utf8(message) + ")";
+    }
+    return result;
+}
 
 class BCryptAlgorithm {
 public:
@@ -177,20 +228,32 @@ std::wstring extended_path(const std::wstring& path) {
     return L"\\\\?\\" + path;
 }
 
-std::optional<std::uint64_t> file_size_bytes(const std::wstring& path) {
+bool is_missing_error(DWORD error) {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+
+struct FileSizeResult {
+    std::optional<std::uint64_t> size;
+    DWORD error = ERROR_SUCCESS;
+};
+
+FileSizeResult file_size_bytes(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(
             extended_path(path).c_str(),
             GetFileExInfoStandard,
             &data
         )) {
-        return std::nullopt;
+        return FileSizeResult{std::nullopt, GetLastError()};
     }
 
     LARGE_INTEGER size{};
     size.HighPart = static_cast<LONG>(data.nFileSizeHigh);
     size.LowPart = data.nFileSizeLow;
-    return static_cast<std::uint64_t>(size.QuadPart);
+    return FileSizeResult{
+        static_cast<std::uint64_t>(size.QuadPart),
+        ERROR_SUCCESS
+    };
 }
 
 void ensure_destination_directory(const std::wstring& path) {
@@ -289,29 +352,42 @@ WinFileCopyEngine::WinFileCopyEngine()
 CopyResult WinFileCopyEngine::copy_and_hash(
     const std::wstring& source_abs,
     const std::wstring& cache_abs,
-    bool compare_hash_before_overwrite
+    bool compare_hash_before_overwrite,
+    const std::atomic_bool& cancelled
 ) {
     CopyResult result;
     result.completed_at = std::chrono::system_clock::now();
 
     const auto source_size = file_size_bytes(source_abs);
-    if (!source_size) {
-        result.action = CopyAction::SourceMissing;
-        result.error_message = "source file does not exist";
+    if (!source_size.size) {
+        if (is_missing_error(source_size.error)) {
+            result.action = CopyAction::SourceMissing;
+            result.error_message =
+                "source file does not exist: error " +
+                describe_error(source_size.error);
+            return result;
+        }
+
+        result.action = CopyAction::Failed;
+        result.error_message =
+            "failed to inspect source: error " +
+            describe_error(source_size.error);
         return result;
     }
 
-    result.source_size_bytes = *source_size;
+    result.source_size_bytes = *source_size.size;
     const auto cache_size = file_size_bytes(cache_abs);
-    if (cache_size) {
-        result.cached_size_bytes = *cache_size;
+    if (cache_size.size) {
+        result.cached_size_bytes = *cache_size.size;
 
-        if (*cache_size == *source_size && !compare_hash_before_overwrite) {
+        if (*cache_size.size == *source_size.size &&
+            !compare_hash_before_overwrite) {
             result.action = CopyAction::SkippedSameSize;
             return result;
         }
 
-        if (*cache_size == *source_size && compare_hash_before_overwrite) {
+        if (*cache_size.size == *source_size.size &&
+            compare_hash_before_overwrite) {
             const auto source_hash = hash_existing_file(source_abs, chunk_size_);
             const auto cache_hash = hash_existing_file(cache_abs, chunk_size_);
             if (source_hash == cache_hash) {
@@ -328,8 +404,18 @@ CopyResult WinFileCopyEngine::copy_and_hash(
 
         Handle source = open_existing_for_read(source_abs);
         if (!source.valid()) {
-            result.action = CopyAction::SourceMissing;
-            result.error_message = "failed to open source";
+            const DWORD open_error = GetLastError();
+            if (is_missing_error(open_error)) {
+                result.action = CopyAction::SourceMissing;
+                result.error_message =
+                    "source file disappeared before copy: error " +
+                    describe_error(open_error);
+                return result;
+            }
+
+            result.action = CopyAction::Failed;
+            result.error_message =
+                "failed to open source: error " + describe_error(open_error);
             return result;
         }
 
@@ -343,8 +429,11 @@ CopyResult WinFileCopyEngine::copy_and_hash(
             nullptr
         ));
         if (!destination.valid()) {
+            const DWORD open_error = GetLastError();
             result.action = CopyAction::Failed;
-            result.error_message = "failed to open cache destination";
+            result.error_message =
+                "failed to open cache destination: error " +
+                describe_error(open_error);
             return result;
         }
 
@@ -356,6 +445,14 @@ CopyResult WinFileCopyEngine::copy_and_hash(
         std::vector<std::byte> buffer(chunk_size_);
 
         while (true) {
+            if (cancelled.load()) {
+                destination.reset();
+                DeleteFileW(extended_path(temp_path).c_str());
+                result.action = CopyAction::Cancelled;
+                result.error_message = "copy cancelled";
+                return result;
+            }
+
             DWORD read = 0;
             if (!ReadFile(
                     source.get(),
@@ -364,9 +461,20 @@ CopyResult WinFileCopyEngine::copy_and_hash(
                     &read,
                     nullptr
                 )) {
+                const DWORD read_error = GetLastError();
                 DeleteFileW(extended_path(temp_path).c_str());
+                if (is_missing_error(read_error)) {
+                    result.action = CopyAction::SourceMissing;
+                    result.error_message =
+                        "source file disappeared during copy: error " +
+                        describe_error(read_error);
+                    return result;
+                }
+
                 result.action = CopyAction::Failed;
-                result.error_message = "failed to read source";
+                result.error_message =
+                    "failed to read source: error " +
+                    describe_error(read_error);
                 return result;
             }
 
@@ -384,9 +492,12 @@ CopyResult WinFileCopyEngine::copy_and_hash(
                     &written,
                     nullptr
                 ) || written != read) {
+                const DWORD write_error = GetLastError();
                 DeleteFileW(extended_path(temp_path).c_str());
                 result.action = CopyAction::Failed;
-                result.error_message = "failed to write cache destination";
+                result.error_message =
+                    "failed to write cache destination: error " +
+                    describe_error(write_error);
                 return result;
             }
 
@@ -396,17 +507,26 @@ CopyResult WinFileCopyEngine::copy_and_hash(
         }
 
         result.hash_hex = hash.finish_hex();
-        result.cached_size_bytes = *source_size;
+        result.cached_size_bytes = *source_size.size;
         result.completed_at = std::chrono::system_clock::now();
+
+        // Release both handles before the rename. The temp file was opened with
+        // an exclusive share mode (share flag 0), so MoveFileExW would otherwise
+        // fail with a sharing violation while the handle is still open.
+        source.reset();
+        destination.reset();
 
         if (!MoveFileExW(
                 extended_path(temp_path).c_str(),
                 extended_path(cache_abs).c_str(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
             )) {
+            const DWORD move_error = GetLastError();
             DeleteFileW(extended_path(temp_path).c_str());
             result.action = CopyAction::Failed;
-            result.error_message = "failed to replace cache file";
+            result.error_message =
+                "failed to replace cache file: error " +
+                describe_error(move_error);
             return result;
         }
 
@@ -419,6 +539,29 @@ CopyResult WinFileCopyEngine::copy_and_hash(
     }
 }
 
+RemoveResult WinFileCopyEngine::remove_cached_file(
+    const std::wstring& cache_abs
+) {
+    RemoveResult result;
+    const auto temp_path = cache_abs + L".ssd-cache.tmp";
+    DeleteFileW(extended_path(temp_path).c_str());
+
+    if (DeleteFileW(extended_path(cache_abs).c_str())) {
+        result.removed = true;
+        return result;
+    }
+
+    const DWORD delete_error = GetLastError();
+    if (is_missing_error(delete_error)) {
+        result.missing = true;
+        return result;
+    }
+
+    result.error_message =
+        "failed to delete cache file: error " + describe_error(delete_error);
+    return result;
+}
+
 void WinFileCopyEngine::set_chunk_size(std::size_t chunk_size) {
     chunk_size_ = chunk_size;
 }
@@ -427,6 +570,22 @@ void WinFileCopyEngine::set_sleep_between_chunks(
     std::chrono::milliseconds delay
 ) {
     sleep_between_chunks_ = delay;
+}
+
+std::optional<std::uint64_t> WinFreeSpaceProvider::free_bytes(
+    const std::wstring& path
+) const {
+    ULARGE_INTEGER free_bytes_available{};
+    if (!GetDiskFreeSpaceExW(
+            path.c_str(),
+            &free_bytes_available,
+            nullptr,
+            nullptr
+        )) {
+        return std::nullopt;
+    }
+
+    return static_cast<std::uint64_t>(free_bytes_available.QuadPart);
 }
 
 }  // namespace ssd_cache

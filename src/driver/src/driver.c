@@ -19,6 +19,10 @@ static FAST_MUTEX g_client_lock;
 
 DRIVER_INITIALIZE DriverEntry;
 
+static VOID CachemonLog(_In_z_ PCSTR Message);
+
+static VOID CachemonLogStatus(_In_z_ PCSTR Prefix, NTSTATUS Status);
+
 static NTSTATUS CachemonUnload(FLT_FILTER_UNLOAD_FLAGS Flags);
 
 static FLT_PREOP_CALLBACK_STATUS CachemonPreRead(
@@ -121,7 +125,18 @@ static const FLT_REGISTRATION g_filter_registration = {
 };
 
 static BOOLEAN CachemonShouldIgnore(PFLT_CALLBACK_DATA Data) {
+    if (Data == NULL || Data->Iopb == NULL) {
+        return TRUE;
+    }
+
     if (FlagOn(Data->Flags, FLTFL_CALLBACK_DATA_GENERATED_IO)) {
+        return TRUE;
+    }
+
+    if (FlagOn(
+        Data->Iopb->IrpFlags,
+        IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO
+    )) {
         return TRUE;
     }
 
@@ -131,6 +146,50 @@ static BOOLEAN CachemonShouldIgnore(PFLT_CALLBACK_DATA Data) {
     }
 
     return FALSE;
+}
+
+static VOID CachemonLog(_In_z_ PCSTR Message) {
+    DbgPrintEx(
+        DPFLTR_IHVDRIVER_ID,
+        DPFLTR_INFO_LEVEL,
+        "CacheMon: %s\n",
+        Message
+    );
+}
+
+static VOID CachemonLogStatus(_In_z_ PCSTR Prefix, NTSTATUS Status) {
+    CHAR message[128];
+    ULONG status_value;
+    SIZE_T index = 0;
+    SIZE_T prefix_index = 0;
+    INT shift;
+    static const CHAR hex_digits[] = "0123456789ABCDEF";
+    static const CHAR separator[] = " status=0x";
+
+    while (Prefix[prefix_index] != '\0' &&
+        index + RTL_NUMBER_OF(separator) + 8 < RTL_NUMBER_OF(message)) {
+        message[index] = Prefix[prefix_index];
+        ++index;
+        ++prefix_index;
+    }
+
+    prefix_index = 0;
+    while (separator[prefix_index] != '\0' &&
+        index + 1 < RTL_NUMBER_OF(message)) {
+        message[index] = separator[prefix_index];
+        ++index;
+        ++prefix_index;
+    }
+
+    status_value = (ULONG)Status;
+    for (shift = 28; shift >= 0 && index + 1 < RTL_NUMBER_OF(message);
+        shift -= 4) {
+        message[index] = hex_digits[(status_value >> shift) & 0xF];
+        ++index;
+    }
+
+    message[index] = '\0';
+    CachemonLog(message);
 }
 
 static VOID CachemonCopyUnicodeString(
@@ -184,6 +243,7 @@ static VOID CachemonSendEvent(
         &name_info
     );
     if (!NT_SUCCESS(status)) {
+        CachemonLog("Failed to resolve file name for activity event.");
         return;
     }
 
@@ -389,6 +449,7 @@ static NTSTATUS CachemonConnect(
     }
     g_client_port = ClientPort;
     ExReleaseFastMutex(&g_client_lock);
+    CachemonLog("Driver accepted user-mode connection.");
     return STATUS_SUCCESS;
 }
 
@@ -402,6 +463,7 @@ static VOID CachemonDisconnect(PVOID ConnectionCookie) {
     }
     g_service_pid = NULL;
     ExReleaseFastMutex(&g_client_lock);
+    CachemonLog("Driver disconnected user-mode client.");
 }
 
 static NTSTATUS CachemonMessage(
@@ -433,6 +495,7 @@ static NTSTATUS CachemonMessage(
 
     if (command->command == CachemonCommandRegisterService) {
         g_service_pid = (HANDLE)(ULONG_PTR)command->service_pid;
+        CachemonLog("Driver registered service process.");
         return STATUS_SUCCESS;
     }
 
@@ -459,6 +522,8 @@ static NTSTATUS CachemonUnload(FLT_FILTER_UNLOAD_FLAGS Flags) {
         g_filter = NULL;
     }
 
+    CachemonLog("Driver unloaded.");
+
     return STATUS_SUCCESS;
 }
 
@@ -471,25 +536,38 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     UNREFERENCED_PARAMETER(RegistryPath);
 
     ExInitializeFastMutex(&g_client_lock);
+    CachemonLog("DriverEntry started.");
 
+    CachemonLog("Calling FltRegisterFilter.");
     status = FltRegisterFilter(
         DriverObject,
         &g_filter_registration,
         &g_filter
     );
     if (!NT_SUCCESS(status)) {
+        CachemonLogStatus("FltRegisterFilter failed.", status);
         return status;
     }
+    CachemonLogStatus("FltRegisterFilter succeeded.", status);
 
+    CachemonLog("Calling FltBuildDefaultSecurityDescriptor.");
     status = FltBuildDefaultSecurityDescriptor(
         &security_descriptor,
         FLT_PORT_ALL_ACCESS
     );
     if (!NT_SUCCESS(status)) {
+        CachemonLogStatus(
+            "FltBuildDefaultSecurityDescriptor failed.",
+            status
+        );
         FltUnregisterFilter(g_filter);
         g_filter = NULL;
         return status;
     }
+    CachemonLogStatus(
+        "FltBuildDefaultSecurityDescriptor succeeded.",
+        status
+    );
 
     RtlInitUnicodeString(&port_name, CACHEMON_PORT_NAME);
     InitializeObjectAttributes(
@@ -500,6 +578,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
         security_descriptor
     );
 
+    CachemonLog("Calling FltCreateCommunicationPort.");
     status = FltCreateCommunicationPort(
         g_filter,
         &g_server_port,
@@ -513,16 +592,22 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     FltFreeSecurityDescriptor(security_descriptor);
 
     if (!NT_SUCCESS(status)) {
+        CachemonLogStatus("FltCreateCommunicationPort failed.", status);
         FltUnregisterFilter(g_filter);
         g_filter = NULL;
         return status;
     }
+    CachemonLogStatus("FltCreateCommunicationPort succeeded.", status);
 
+    CachemonLog("Calling FltStartFiltering.");
     status = FltStartFiltering(g_filter);
     if (!NT_SUCCESS(status)) {
+        CachemonLogStatus("FltStartFiltering failed.", status);
         CachemonUnload(0);
         return status;
     }
+    CachemonLogStatus("FltStartFiltering succeeded.", status);
 
+    CachemonLog("DriverEntry completed successfully.");
     return STATUS_SUCCESS;
 }

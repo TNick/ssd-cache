@@ -9,6 +9,7 @@
 
 #include "cachemon_messages.h"
 #include "ssd_cache/path_mapper.h"
+#include "ssd_cache/win_config_paths.h"
 
 namespace ssd_cache {
 namespace {
@@ -91,6 +92,11 @@ void WinFilterActivitySource::start() {
         command.source_unc,
         CACHEMON_MAX_ROOT_CHARS,
         source_unc_
+    );
+    copy_bounded_wide(
+        command.log_path,
+        CACHEMON_MAX_LOG_PATH_CHARS,
+        nt_path_from_win32_path(default_driver_log_path())
     );
 
     DWORD bytes_returned = 0;

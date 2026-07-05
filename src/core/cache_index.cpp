@@ -118,6 +118,10 @@ PendingJob read_pending_job(sqlite3_stmt* stmt) {
     );
     job.reason = column_text(stmt, 2);
     job.retries = sqlite3_column_int(stmt, 3);
+    job.requestor_pid = static_cast<std::uint64_t>(
+        sqlite3_column_int64(stmt, 4)
+    );
+    job.requestor_process = column_text(stmt, 5);
     return job;
 }
 
@@ -128,6 +132,29 @@ void exec(sqlite3* db, const char* sql) {
         std::string message = error == nullptr ? sqlite3_errmsg(db) : error;
         sqlite3_free(error);
         throw std::runtime_error(message);
+    }
+}
+
+bool column_exists(sqlite3* db, const char* table_name, const char* column_name) {
+    Statement statement(db, "SELECT name FROM pragma_table_info(?1)");
+    statement.bind_text(1, table_name);
+    while (statement.step_row()) {
+        if (column_text(statement.get(), 0) == column_name) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void add_column_if_missing(
+    sqlite3* db,
+    const char* table_name,
+    const char* column_name,
+    const char* sql
+) {
+    if (!column_exists(db, table_name, column_name)) {
+        exec(db, sql);
     }
 }
 
@@ -179,6 +206,10 @@ void CacheIndex::record_access(
     const AccessEvent& event,
     std::chrono::seconds copy_delay
 ) {
+    if (event.relative_path.empty()) {
+        return;
+    }
+
     std::lock_guard lock(mutex_);
     auto* db = require_db();
     exec(db, "BEGIN IMMEDIATE;");
@@ -188,13 +219,16 @@ void CacheIndex::record_access(
             db,
             "INSERT INTO files("
             "relative_path, last_seen_utc, last_write_close_utc, "
-            "source_size_bytes, cache_present"
-            ") VALUES(?1, ?2, ?3, ?4, 0) "
+            "source_size_bytes, cache_present, last_requestor_pid, "
+            "last_requestor_process"
+            ") VALUES(?1, ?2, ?3, ?4, 0, ?5, ?6) "
             "ON CONFLICT(relative_path) DO UPDATE SET "
             "last_seen_utc=excluded.last_seen_utc, "
             "last_write_close_utc=COALESCE("
             "excluded.last_write_close_utc, files.last_write_close_utc), "
-            "source_size_bytes=excluded.source_size_bytes"
+            "source_size_bytes=excluded.source_size_bytes, "
+            "last_requestor_pid=excluded.last_requestor_pid, "
+            "last_requestor_process=excluded.last_requestor_process"
         );
         statement.bind_wide(1, event.relative_path);
         statement.bind_time(2, event.observed_at);
@@ -206,21 +240,29 @@ void CacheIndex::record_access(
         }
 
         statement.bind_int64(4, event.size_hint);
+        statement.bind_int64(5, event.requestor_pid);
+        statement.bind_text(6, event.requestor_process);
         statement.step_done();
 
         if (should_schedule_copy(event.kind)) {
             const auto due = event.observed_at + copy_delay;
             Statement pending(
                 db,
-                "INSERT INTO pending_jobs(relative_path, due_utc, reason) "
-                "VALUES(?1, ?2, ?3) "
+                "INSERT INTO pending_jobs("
+                "relative_path, due_utc, reason, requestor_pid, "
+                "requestor_process"
+                ") VALUES(?1, ?2, ?3, ?4, ?5) "
                 "ON CONFLICT(relative_path) DO UPDATE SET "
                 "due_utc=excluded.due_utc, "
-                "reason=excluded.reason"
+                "reason=excluded.reason, "
+                "requestor_pid=excluded.requestor_pid, "
+                "requestor_process=excluded.requestor_process"
             );
             pending.bind_wide(1, event.relative_path);
             pending.bind_time(2, due);
             pending.bind_text(3, access_kind_to_string(event.kind));
+            pending.bind_int64(4, event.requestor_pid);
+            pending.bind_text(5, event.requestor_process);
             pending.step_done();
         }
 
@@ -236,6 +278,10 @@ void CacheIndex::upsert_pending_job(
     std::chrono::system_clock::time_point due_utc,
     std::string_view reason
 ) {
+    if (relative_path.empty()) {
+        return;
+    }
+
     std::lock_guard lock(mutex_);
     Statement statement(
         require_db(),
@@ -256,7 +302,8 @@ std::optional<PendingJob> CacheIndex::pending_job(
     std::lock_guard lock(mutex_);
     Statement statement(
         require_db(),
-        "SELECT relative_path, due_utc, reason, retries "
+        "SELECT relative_path, due_utc, reason, retries, "
+        "requestor_pid, requestor_process "
         "FROM pending_jobs WHERE relative_path=?1"
     );
     statement.bind_wide(1, relative_path);
@@ -271,7 +318,8 @@ std::vector<PendingJob> CacheIndex::load_pending_jobs() {
     std::lock_guard lock(mutex_);
     Statement statement(
         require_db(),
-        "SELECT relative_path, due_utc, reason, retries "
+        "SELECT relative_path, due_utc, reason, retries, "
+        "requestor_pid, requestor_process "
         "FROM pending_jobs ORDER BY due_utc"
     );
 
@@ -283,6 +331,43 @@ std::vector<PendingJob> CacheIndex::load_pending_jobs() {
     return jobs;
 }
 
+std::vector<std::wstring> CacheIndex::load_record_paths() {
+    std::lock_guard lock(mutex_);
+    Statement statement(
+        require_db(),
+        "SELECT relative_path FROM files ORDER BY relative_path"
+    );
+
+    std::vector<std::wstring> paths;
+    while (statement.step_row()) {
+        paths.push_back(utf8_to_wide(column_text(statement.get(), 0)));
+    }
+
+    return paths;
+}
+
+std::vector<CachedFileRef> CacheIndex::cached_files_by_last_access() {
+    std::lock_guard lock(mutex_);
+    Statement statement(
+        require_db(),
+        "SELECT relative_path, cached_size_bytes FROM files "
+        "WHERE cache_present=1 "
+        "ORDER BY last_seen_utc ASC, relative_path ASC"
+    );
+
+    std::vector<CachedFileRef> files;
+    while (statement.step_row()) {
+        CachedFileRef ref;
+        ref.relative_path = utf8_to_wide(column_text(statement.get(), 0));
+        ref.cached_size_bytes = static_cast<std::uint64_t>(
+            sqlite3_column_int64(statement.get(), 1)
+        );
+        files.push_back(std::move(ref));
+    }
+
+    return files;
+}
+
 std::vector<PendingJob> CacheIndex::due_jobs(
     std::chrono::system_clock::time_point now_utc,
     int limit
@@ -290,7 +375,8 @@ std::vector<PendingJob> CacheIndex::due_jobs(
     std::lock_guard lock(mutex_);
     Statement statement(
         require_db(),
-        "SELECT relative_path, due_utc, reason, retries "
+        "SELECT relative_path, due_utc, reason, retries, "
+        "requestor_pid, requestor_process "
         "FROM pending_jobs WHERE due_utc <= ?1 "
         "ORDER BY due_utc LIMIT ?2"
     );
@@ -313,6 +399,32 @@ void CacheIndex::remove_pending_job(const std::wstring& relative_path) {
     );
     statement.bind_wide(1, relative_path);
     statement.step_done();
+}
+
+void CacheIndex::delete_record(const std::wstring& relative_path) {
+    std::lock_guard lock(mutex_);
+    auto* db = require_db();
+    exec(db, "BEGIN IMMEDIATE;");
+
+    try {
+        Statement pending(
+            db,
+            "DELETE FROM pending_jobs WHERE relative_path=?1"
+        );
+        pending.bind_wide(1, relative_path);
+        pending.step_done();
+
+        Statement files(
+            db,
+            "DELETE FROM files WHERE relative_path=?1"
+        );
+        files.bind_wide(1, relative_path);
+        files.step_done();
+        exec(db, "COMMIT;");
+    } catch (...) {
+        exec(db, "ROLLBACK;");
+        throw;
+    }
 }
 
 void CacheIndex::mark_cached(
@@ -401,7 +513,8 @@ std::optional<FileRecord> CacheIndex::file_record(
         require_db(),
         "SELECT relative_path, last_seen_utc, last_write_close_utc, "
         "source_size_bytes, cached_size_bytes, cached_at_utc, "
-        "hash_algo, hash_hex, hash_at_utc, cache_present, last_error "
+        "hash_algo, hash_hex, hash_at_utc, cache_present, last_error, "
+        "last_requestor_pid, last_requestor_process "
         "FROM files WHERE relative_path=?1"
     );
     statement.bind_wide(1, relative_path);
@@ -428,6 +541,10 @@ std::optional<FileRecord> CacheIndex::file_record(
     record.hash_at_utc = column_time(statement.get(), 8);
     record.cache_present = sqlite3_column_int(statement.get(), 9) != 0;
     record.last_error = column_text(statement.get(), 10);
+    record.last_requestor_pid = static_cast<std::uint64_t>(
+        sqlite3_column_int64(statement.get(), 11)
+    );
+    record.last_requestor_process = column_text(statement.get(), 12);
     return record;
 }
 
@@ -449,7 +566,9 @@ void CacheIndex::initialize_schema() {
         "hash_hex TEXT,"
         "hash_at_utc TEXT,"
         "cache_present INTEGER NOT NULL DEFAULT 0,"
-        "last_error TEXT"
+        "last_error TEXT,"
+        "last_requestor_pid INTEGER NOT NULL DEFAULT 0,"
+        "last_requestor_process TEXT NOT NULL DEFAULT ''"
         ");"
     );
     exec(
@@ -459,8 +578,38 @@ void CacheIndex::initialize_schema() {
         "due_utc TEXT NOT NULL,"
         "reason TEXT NOT NULL,"
         "retries INTEGER NOT NULL DEFAULT 0,"
+        "requestor_pid INTEGER NOT NULL DEFAULT 0,"
+        "requestor_process TEXT NOT NULL DEFAULT '',"
         "FOREIGN KEY(relative_path) REFERENCES files(relative_path)"
         ");"
+    );
+    add_column_if_missing(
+        db_,
+        "files",
+        "last_requestor_pid",
+        "ALTER TABLE files ADD COLUMN "
+        "last_requestor_pid INTEGER NOT NULL DEFAULT 0;"
+    );
+    add_column_if_missing(
+        db_,
+        "files",
+        "last_requestor_process",
+        "ALTER TABLE files ADD COLUMN "
+        "last_requestor_process TEXT NOT NULL DEFAULT '';"
+    );
+    add_column_if_missing(
+        db_,
+        "pending_jobs",
+        "requestor_pid",
+        "ALTER TABLE pending_jobs ADD COLUMN "
+        "requestor_pid INTEGER NOT NULL DEFAULT 0;"
+    );
+    add_column_if_missing(
+        db_,
+        "pending_jobs",
+        "requestor_process",
+        "ALTER TABLE pending_jobs ADD COLUMN "
+        "requestor_process TEXT NOT NULL DEFAULT '';"
     );
     exec(
         db_,

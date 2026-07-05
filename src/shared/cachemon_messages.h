@@ -6,6 +6,7 @@
 #define CACHEMON_COMMAND_VERSION 1
 #define CACHEMON_EVENT_VERSION 1
 #define CACHEMON_MAX_ROOT_CHARS 260
+#define CACHEMON_MAX_LOG_PATH_CHARS 260
 #define CACHEMON_MAX_RELATIVE_CHARS 1024
 
 typedef enum CACHEMON_ACCESS_KIND {
@@ -26,6 +27,7 @@ typedef struct CACHEMON_COMMAND {
     uint32_t command;
     uint64_t service_pid;
     wchar_t source_unc[CACHEMON_MAX_ROOT_CHARS];
+    wchar_t log_path[CACHEMON_MAX_LOG_PATH_CHARS];
 } CACHEMON_COMMAND;
 typedef CACHEMON_COMMAND* PCACHEMON_COMMAND;
 

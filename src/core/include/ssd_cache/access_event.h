@@ -21,6 +21,7 @@ struct AccessEvent {
     AccessKind kind = AccessKind::ReadOpen;
     std::uint64_t size_hint = 0;
     std::uint64_t requestor_pid = 0;
+    std::string requestor_process;
     std::chrono::system_clock::time_point observed_at =
         std::chrono::system_clock::now();
 };

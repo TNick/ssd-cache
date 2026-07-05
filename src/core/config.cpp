@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 #include "ssd_cache/utf.h"
 
@@ -24,6 +25,69 @@ std::wstring trim(std::wstring value) {
         value.end()
     );
     return value;
+}
+
+std::wstring lower_copy(std::wstring_view value) {
+    std::wstring lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return lowered;
+}
+
+std::wstring filename_from_path(std::wstring_view path) {
+    const auto last_separator = path.find_last_of(L"\\/");
+    if (last_separator == std::wstring_view::npos) {
+        return std::wstring(path);
+    }
+
+    return std::wstring(path.substr(last_separator + 1));
+}
+
+bool wildcard_match_ignore_case(
+    std::wstring_view pattern,
+    std::wstring_view value
+) {
+    const auto lowered_pattern = lower_copy(pattern);
+    const auto lowered_value = lower_copy(value);
+    std::size_t pattern_index = 0;
+    std::size_t value_index = 0;
+    std::size_t star_index = std::wstring::npos;
+    std::size_t star_match_index = 0;
+
+    while (value_index < lowered_value.size()) {
+        if (pattern_index < lowered_pattern.size() &&
+            (lowered_pattern[pattern_index] == L'?' ||
+             lowered_pattern[pattern_index] == lowered_value[value_index])) {
+            ++pattern_index;
+            ++value_index;
+            continue;
+        }
+
+        if (pattern_index < lowered_pattern.size() &&
+            lowered_pattern[pattern_index] == L'*') {
+            star_index = pattern_index;
+            star_match_index = value_index;
+            ++pattern_index;
+            continue;
+        }
+
+        if (star_index != std::wstring::npos) {
+            pattern_index = star_index + 1;
+            ++star_match_index;
+            value_index = star_match_index;
+            continue;
+        }
+
+        return false;
+    }
+
+    while (pattern_index < lowered_pattern.size() &&
+        lowered_pattern[pattern_index] == L'*') {
+        ++pattern_index;
+    }
+
+    return pattern_index == lowered_pattern.size();
 }
 
 std::map<std::wstring, std::wstring> read_key_values(const std::wstring& path) {
@@ -66,6 +130,63 @@ wchar_t read_letter(
     return static_cast<wchar_t>(std::towupper(iter->second.front()));
 }
 
+std::vector<std::wstring> split_patterns(std::wstring_view value) {
+    std::vector<std::wstring> patterns;
+    std::size_t start = 0;
+
+    while (start <= value.size()) {
+        std::size_t end = start;
+        while (end < value.size() && value[end] != L',' && value[end] != L';') {
+            ++end;
+        }
+
+        auto pattern = trim(std::wstring(value.substr(start, end - start)));
+        if (!pattern.empty()) {
+            patterns.push_back(std::move(pattern));
+        }
+
+        if (end == value.size()) {
+            break;
+        }
+
+        start = end + 1;
+    }
+
+    return patterns;
+}
+
+std::wstring join_patterns(const std::vector<std::wstring>& patterns) {
+    std::wstring result;
+    for (const auto& pattern : patterns) {
+        if (!result.empty()) {
+            result.push_back(L';');
+        }
+
+        result.append(pattern);
+    }
+
+    return result;
+}
+
+bool value_matches_any_pattern(
+    const std::vector<std::wstring>& patterns,
+    std::wstring_view value
+) {
+    if (value.empty()) {
+        return false;
+    }
+
+    const auto filename = filename_from_path(value);
+    for (const auto& pattern : patterns) {
+        if (wildcard_match_ignore_case(pattern, value) ||
+            wildcard_match_ignore_case(pattern, filename)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 }  // namespace
 
 std::wstring cache_root_from_config(const AppConfig& config) {
@@ -80,6 +201,23 @@ std::wstring source_presentation_root_from_config(const AppConfig& config) {
     root.push_back(config.source_presentation_letter);
     root.append(L":\\");
     return root;
+}
+
+bool process_matches_ignored_patterns(
+    const AppConfig& config,
+    std::wstring_view process_path
+) {
+    return value_matches_any_pattern(
+        config.ignored_process_patterns,
+        process_path
+    );
+}
+
+bool path_matches_ignored_patterns(
+    const AppConfig& config,
+    std::wstring_view relative_path
+) {
+    return value_matches_any_pattern(config.ignored_path_patterns, relative_path);
 }
 
 std::wstring app_mode_to_wstring(AppMode mode) {
@@ -128,6 +266,11 @@ AppConfig load_config_file(const std::wstring& path) {
         config.sqlite_path = iter->second;
     }
 
+    if (const auto iter = values.find(L"mode"); iter != values.end() &&
+        !iter->second.empty()) {
+        config.mode = app_mode_from_wstring(iter->second);
+    }
+
     if (const auto iter = values.find(L"copy_delay_seconds"); iter != values.end()) {
         config.copy_delay = std::chrono::seconds(std::stoll(iter->second));
     }
@@ -136,6 +279,23 @@ AppConfig load_config_file(const std::wstring& path) {
         iter != values.end()) {
         config.compare_hash_before_overwrite =
             iter->second == L"1" || iter->second == L"true";
+    }
+
+    if (const auto iter = values.find(L"min_free_space_mb");
+        iter != values.end() && !iter->second.empty()) {
+        config.min_free_bytes =
+            static_cast<std::uint64_t>(std::stoull(iter->second)) *
+            (1024ULL * 1024ULL);
+    }
+
+    if (const auto iter = values.find(L"ignored_process_patterns");
+        iter != values.end()) {
+        config.ignored_process_patterns = split_patterns(iter->second);
+    }
+
+    if (const auto iter = values.find(L"ignored_path_patterns");
+        iter != values.end()) {
+        config.ignored_path_patterns = split_patterns(iter->second);
     }
 
     config.source_presentation_letter =
@@ -163,9 +323,21 @@ void save_config_file(const std::wstring& path, const AppConfig& config) {
            << narrow_ascii(std::wstring(1, config.cache_letter))
            << "\n";
     output << "sqlite_path=" << wide_to_utf8(config.sqlite_path) << "\n";
+    if (config.mode.has_value()) {
+        output << "mode=" << wide_to_utf8(app_mode_to_wstring(*config.mode))
+               << "\n";
+    }
     output << "copy_delay_seconds=" << config.copy_delay.count() << "\n";
     output << "compare_hash_before_overwrite="
            << (config.compare_hash_before_overwrite ? "1" : "0") << "\n";
+    output << "min_free_space_mb=" << (config.min_free_bytes / (1024ULL * 1024ULL))
+           << "\n";
+    output << "ignored_process_patterns="
+           << wide_to_utf8(join_patterns(config.ignored_process_patterns))
+           << "\n";
+    output << "ignored_path_patterns="
+           << wide_to_utf8(join_patterns(config.ignored_path_patterns))
+           << "\n";
 }
 
 }  // namespace ssd_cache

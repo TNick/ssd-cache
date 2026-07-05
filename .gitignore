@@ -14,3 +14,4 @@ src/driver/cachemon.C2E6D862/
 *.sqlite3-wal
 *.log
 *.tmp
+playground/

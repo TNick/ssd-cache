@@ -26,6 +26,13 @@ struct FileRecord {
     std::optional<std::chrono::system_clock::time_point> hash_at_utc;
     bool cache_present = false;
     std::string last_error;
+    std::uint64_t last_requestor_pid = 0;
+    std::string last_requestor_process;
+};
+
+struct CachedFileRef {
+    std::wstring relative_path;
+    std::uint64_t cached_size_bytes = 0;
 };
 
 struct PendingJob {
@@ -33,6 +40,8 @@ struct PendingJob {
     std::chrono::system_clock::time_point due_utc;
     std::string reason;
     int retries = 0;
+    std::uint64_t requestor_pid = 0;
+    std::string requestor_process;
 };
 
 class CacheIndex {
@@ -65,12 +74,20 @@ public:
 
     std::vector<PendingJob> load_pending_jobs();
 
+    std::vector<std::wstring> load_record_paths();
+
+    // Cached files (cache_present=1) ordered by last access, least recently
+    // accessed first. Used by free-space eviction to pick victims.
+    std::vector<CachedFileRef> cached_files_by_last_access();
+
     std::vector<PendingJob> due_jobs(
         std::chrono::system_clock::time_point now_utc,
         int limit
     );
 
     void remove_pending_job(const std::wstring& relative_path);
+
+    void delete_record(const std::wstring& relative_path);
 
     void mark_cached(
         const std::wstring& relative_path,
