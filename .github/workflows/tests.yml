@@ -13,15 +13,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The user-mode preset builds the portable core, the Windows service/tray
-      # and the test executable, but skips the WDK minifilter driver (which
-      # needs the Windows Driver Kit and a signed/loaded driver to exercise).
-      # That is exactly the surface the automated tests cover.
+      # Initialize the MSVC x64 toolchain so cl.exe/link.exe and the Windows
+      # SDK are on PATH. This is more robust than relying on CMake's Visual
+      # Studio generator auto-detection, which varies across runner images.
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # The `ci` preset uses the Ninja generator and builds the portable core,
+      # the Windows service/tray and the test executable, but skips the WDK
+      # minifilter driver (which needs the Windows Driver Kit and a loaded
+      # driver to exercise). That is exactly the surface the tests cover.
       - name: Configure
-        run: cmake --preset windows-user-mode-debug
+        run: cmake --preset ci
 
       - name: Build
-        run: cmake --build --preset windows-user-mode-debug
+        run: cmake --build --preset ci
 
       - name: Test
-        run: ctest --preset windows-user-mode-debug
+        run: ctest --preset ci

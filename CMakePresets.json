@@ -52,6 +52,18 @@
       "cacheVariables": {
         "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "ON"
       }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI (Ninja, user-mode)",
+      "description": "User-mode build with Ninja; expects an initialized MSVC environment. Used by GitHub Actions.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ci",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SSD_CACHE_BUILD_TESTS": "ON",
+        "SSD_CACHE_DEVELOPMENT_USER_MODE_ONLY": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -79,6 +91,10 @@
       "name": "windows-user-mode-debug",
       "configurePreset": "windows-user-mode-debug",
       "configuration": "Debug"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
     }
   ],
   "testPresets": [
@@ -110,6 +126,13 @@
       "name": "windows-user-mode-debug",
       "configurePreset": "windows-user-mode-debug",
       "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
       "output": {
         "outputOnFailure": true
       }
